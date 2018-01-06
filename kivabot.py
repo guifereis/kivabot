@@ -9,8 +9,9 @@ base_url = "https://api.kivaws.org/v1/"
 cached_loans = dict()
 
 class Loan():
-	def __init__(self, loan_id, repayment_json, days_til_repayment_event, percent_repaid, loan_total):
+	def __init__(self, loan_id, loan_type, repayment_json=None, days_til_repayment_event=None, percent_repaid=None, loan_total=None):
 		self.loan_id = loan_id
+		self.loan_type = loan_type
 		self.repayment_json = repayment_json
 		self.days_til_repayment_event = days_til_repayment_event
 		self.percent_repaid = percent_repaid
@@ -40,20 +41,18 @@ def repayment_url(loan_id):
 	return "loans/"+str(loan_id)+"/repayments.json"
 
 
+def loan_is_direct(loan_id, resp):
+	if "code" in resp and resp["code"] == str(4096):
+		print("Ignoring loan-id "+str(loan_id)+": "+resp["message"])
+		return True
+	return False
+
 def process_repayments(loan_id):
-	repayments = requests.get(base_url+repayment_url(fundraising_id))
-	# Handle error for invalid loan_id
-	repayments = repayments.json()
-	num_repayment_events = len(repayments)
-	if num_repayment_events == 0: # Loan no longer fundraising, abort
-		return
-	
-	# We construct a measure similar to an expected value
-	# where days-until-each-repayment is weighted by the
-	# percentage of the loan being paid at each repayment.
-	# This represents the average time each $ takes to be repaid.
-	
 	def calc_avg_repayment_days(reps):
+		# We construct a measure similar to an expected value
+		# where days-until-each-repayment is weighted by the
+		# percentage of the loan being paid at each repayment.
+		# This represents the average time each $ takes to be repaid.
 		days_til_repayment_event = np.zeros(len(reps))
 		amounts_repaid = np.zeros(len(reps))
 		percent_repaid = np.zeros(len(reps))
@@ -67,25 +66,42 @@ def process_repayments(loan_id):
 			
 		percent_repaid = amounts_repaid/np.sum(amounts_repaid)
 		assert np.sum(percent_repaid)==1.0
-		
 		avg_repayment_days = np.dot(percent_repaid, days_til_repayment_event)
-		
-		cached_loans[loan_id] = Loan(loan_id, reps, days_til_repayment_event, percent_repaid, np.sum(amounts_repaid))
-		
-		
+		cached_loans[loan_id] = Loan(loan_id, "partner", reps, days_til_repayment_event, percent_repaid, np.sum(amounts_repaid))
 		return avg_repayment_days
+	
+	repayments = requests.get(base_url+repayment_url(loan_id))
+	repayments = repayments.json()
+	
+	if loan_is_direct(loan_id, repayments):
+		# Handle error for invalid loan_id
+		# Nonpartner loan, no repayments chart available
+		# TODO: Try to fetch data for this case?
+		return -1
+	
+	num_repayment_events = len(repayments)
+	if num_repayment_events == 0: # Loan no longer fundraising, abort
+		print("Ignoring loan-id "+str(loan_id)+": loan no longer fundraising.")
+		return -1
+		
+	avg_repayment_days = calc_avg_repayment_days(repayments)
+	print("AVG REPAYMENT DAYS: "+str(avg_repayment_days))
+	return avg_repayment_days
 			
 	
-	calc_avg_repayment_days(repayments)
+	
 	
 
 fundraising_id = 1430697
 
 funded_id = 1446764
 
-#resp = requests.get(base_url+repayment_url(fundraising_id))
+nonpartner_fundraising_id = 1439911
 
-process_repayments(fundraising_id)
-print(cached_loans[fundraising_id])
 
-#resp = requests.get(base_url+repayment_url(funded_id))
+
+test_loan_id = funded_id
+
+if process_repayments(test_loan_id) >= 0:
+	print(cached_loans[test_loan_id])
+
