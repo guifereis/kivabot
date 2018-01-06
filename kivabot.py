@@ -1,12 +1,15 @@
 import requests
 import json
 import datetime
+import pickle
+from tqdm import tqdm
 
 import numpy as np
 
 base_url = "https://api.kivaws.org/v1/"
 
 cached_loans = dict()
+seen_loan_ids = set()
 
 class Loan():
 	def __init__(self, loan_id, loan_type, repayment_json=None, days_til_repayment_event=None, percent_repaid=None, loan_total=None):
@@ -25,16 +28,22 @@ class Loan():
 	 
 		return ', '.join(sb)
 
-def fetch_newest_loans():
-	newest_url = "loans/newest.json"+"?page=1&per_page=10&ids_only=true"
+def fetch_newest_loans(page=1, per_page=100):
+	newest_url = "loans/newest.json"+"?page="+str(page)+"&per_page="+str(per_page)+"&ids_only=true"
 
 	resp = requests.get(base_url+newest_url)
+	resp = resp.json()
 
-	new_loan_ids = resp.json()["loans"]
+	new_loan_ids = resp["loans"]
+	num_pages = resp["paging"]["pages"]
+	
+	return set(new_loan_ids), num_pages
+	
+	# TODO: decide what to do about following 2 lines
 
-	seen_loan_ids = set()
+	#seen_loan_ids = set()
 
-	new_loan_ids = list(set(new_loan_ids) - seen_loan_ids)
+	#new_loan_ids = list(set(new_loan_ids) - seen_loan_ids)
 
 
 def repayment_url(loan_id):
@@ -47,7 +56,9 @@ def loan_is_direct(loan_id, resp):
 		return True
 	return False
 
-def process_repayments(loan_id):
+def process_repayments(loan_id, using_tqdm=False, max_days_print_thres=100):
+	# Returns a stringly negative int in case of error. Otherwise,
+	# returns "average days to repayment" (see below.)
 	def calc_avg_repayment_days(reps):
 		# We construct a measure similar to an expected value
 		# where days-until-each-repayment is weighted by the
@@ -65,9 +76,10 @@ def process_repayments(loan_id):
 			amounts_repaid[rep_idx] = reps[rep_idx]["expected_repayment"]
 			
 		percent_repaid = amounts_repaid/np.sum(amounts_repaid)
-		assert np.sum(percent_repaid)==1.0
+		assert np.isclose(np.sum(percent_repaid), 1.0)
 		avg_repayment_days = np.dot(percent_repaid, days_til_repayment_event)
 		cached_loans[loan_id] = Loan(loan_id, "partner", reps, days_til_repayment_event, percent_repaid, np.sum(amounts_repaid))
+		seen_loan_ids.add(loan_id)
 		return avg_repayment_days
 	
 	repayments = requests.get(base_url+repayment_url(loan_id))
@@ -85,23 +97,52 @@ def process_repayments(loan_id):
 		return -1
 		
 	avg_repayment_days = calc_avg_repayment_days(repayments)
-	print("AVG REPAYMENT DAYS: "+str(avg_repayment_days))
+	if avg_repayment_days < max_days_print_thres:
+		msg = ""+str(loan_id)+" AVG REPAYMENT DAYS: "+str(round(avg_repayment_days))
+		if using_tqdm:
+			tqdm.write(msg)
+		else:
+			print(msg)
 	return avg_repayment_days
-			
+
+
+def init_cache(cached_loans_filename=None, seen_loans_filename=None):
+	global cached_loans
+	global seen_loan_ids
 	
+	if cached_loans_filename is not None:
+		cached_loans = pickle.load( open(cached_loans_filename, "rb" ))
+	if seen_loans_filename is not None:
+		seen_loan_ids = pickle.load( open(seen_loans_filename, "rb" ))
 	
+	new_loan_ids, num_newest_pages = fetch_newest_loans(page=1, per_page=500)
+	loan_ids = set()
+	for cur_page in range(1, num_newest_pages+1)[::-1]:
+		new_loan_ids, num_newest_pages = fetch_newest_loans(page=cur_page, per_page=500)
+		loan_ids |= new_loan_ids
+	print("Num new loan-ids: "+str(len(loan_ids)))
+	
+	for loan_id in tqdm(loan_ids):
+		process_repayments(loan_id, using_tqdm=True)
+		
 	
 
-fundraising_id = 1430697
+#fundraising_id = 1430697
+#funded_id = 1446764
+#nonpartner_fundraising_id = 1439911
+#test_loan_id = fundraising_id
 
-funded_id = 1446764
+#if process_repayments(test_loan_id) >= 0:
+	#pass
+	#print(cached_loans[test_loan_id])
 
-nonpartner_fundraising_id = 1439911
+#for loan_id in fetch_newest_loans():
+#	print(loan_id)
+#	process_repayments(loan_id)
 
+init_cache()
+pickle.dump(cached_loans, open("cached_loans.pickle", "wb"))
+pickle.dump(seen_loan_ids, open("seen_loan_ids.pickle", "wb"))
 
-
-test_loan_id = funded_id
-
-if process_repayments(test_loan_id) >= 0:
-	print(cached_loans[test_loan_id])
-
+print(".........")
+print(cached_loans)
