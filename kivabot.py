@@ -52,11 +52,11 @@ def repayment_url(loan_id):
 
 def loan_is_direct(loan_id, resp):
 	if "code" in resp and resp["code"] == str(4096):
-		print("Ignoring loan-id "+str(loan_id)+": "+resp["message"])
+		#print("Ignoring loan-id "+str(loan_id)+": "+resp["message"])
 		return True
 	return False
 
-def process_repayments(loan_id, using_tqdm=False, max_days_print_thres=100):
+def process_repayments(loan_id):
 	# Returns a stringly negative int in case of error. Otherwise,
 	# returns "average days to repayment" (see below.)
 	def calc_avg_repayment_days(reps):
@@ -78,9 +78,10 @@ def process_repayments(loan_id, using_tqdm=False, max_days_print_thres=100):
 		percent_repaid = amounts_repaid/np.sum(amounts_repaid)
 		assert np.isclose(np.sum(percent_repaid), 1.0)
 		avg_repayment_days = np.dot(percent_repaid, days_til_repayment_event)
-		cached_loans[loan_id] = Loan(loan_id, "partner", reps, days_til_repayment_event, percent_repaid, np.sum(amounts_repaid))
-		seen_loan_ids.add(loan_id)
-		return avg_repayment_days
+		#cached_loans[loan_id] = Loan(loan_id, "partner", reps, days_til_repayment_event, percent_repaid, np.sum(amounts_repaid))
+		loan_obj = Loan(loan_id, "partner", reps, days_til_repayment_event, percent_repaid, np.sum(amounts_repaid))
+		#seen_loan_ids.add(loan_id)
+		return avg_repayment_days, loan_obj
 	
 	repayments = requests.get(base_url+repayment_url(loan_id))
 	repayments = repayments.json()
@@ -89,24 +90,37 @@ def process_repayments(loan_id, using_tqdm=False, max_days_print_thres=100):
 		# Handle error for invalid loan_id
 		# Nonpartner loan, no repayments chart available
 		# TODO: Try to fetch data for this case?
-		return -1
+		return -2, repayments
 	
 	num_repayment_events = len(repayments)
 	if num_repayment_events == 0: # Loan no longer fundraising, abort
-		print("Ignoring loan-id "+str(loan_id)+": loan no longer fundraising.")
-		return -1
+		#print("Ignoring loan-id "+str(loan_id)+": loan no longer fundraising.")
+		return -3, None
 		
-	avg_repayment_days = calc_avg_repayment_days(repayments)
-	if avg_repayment_days < max_days_print_thres:
-		msg = ""+str(loan_id)+" AVG REPAYMENT DAYS: "+str(round(avg_repayment_days))
-		if using_tqdm:
-			tqdm.write(msg)
-		else:
-			print(msg)
-	return avg_repayment_days
+	avg_repayment_days, loan_obj = calc_avg_repayment_days(repayments)
 
+	return avg_repayment_days, loan_obj
 
-def init_cache(cached_loans_filename=None, seen_loans_filename=None):
+def handle_repayment_processed_return(loan_id, avg_repayment_days, loan_obj, using_tqdm=False, max_days_print_thres=100):
+	if avg_repayment_days == -2:
+		# We are abusing loan_obj to be the json response in case of error
+		print("Ignoring loan-id "+str(loan_id)+": "+loan_obj["message"])
+	elif avg_repayment_days == -3:
+		print("Ignoring loan-id "+str(loan_id)+": loan no longer fundraising.")
+	elif avg_repayment_days < 0:
+		print("!!! UNKNOWN ERROR !!!")
+	elif avg_repayment_days >= 0:
+		if avg_repayment_days < max_days_print_thres:
+			msg = ""+str(loan_id)+" AVG REPAYMENT DAYS: "+str(round(avg_repayment_days))
+			if using_tqdm:
+				tqdm.write(msg)
+			else:
+				print(msg)
+	seen_loan_ids.add(loan_id)
+	cached_loans[loan_id] = loan_obj
+	
+
+def init_cache(cached_loans_filename=None, seen_loans_filename=None, multithread=False):
 	global cached_loans
 	global seen_loan_ids
 	
@@ -122,8 +136,30 @@ def init_cache(cached_loans_filename=None, seen_loans_filename=None):
 		loan_ids |= new_loan_ids
 	print("Num new loan-ids: "+str(len(loan_ids)))
 	
-	for loan_id in tqdm(loan_ids):
-		process_repayments(loan_id, using_tqdm=True)
+	if multithread:
+		#t = tqdm(total=len(loan_ids))
+		import concurrent.futures
+		with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+			future_to_loan_id = {executor.submit(process_repayments, loan_id): loan_id for loan_id in loan_ids}
+			for future in tqdm(concurrent.futures.as_completed(future_to_loan_id), total=len(loan_ids)):
+				pass # just to update progress bar
+			#for future in concurrent.futures.as_completed(future_to_loan_id):
+				##tqdm.write(loan_id)
+				#t.update() # update progress bar
+		for future, loan_id in tqdm(futures.iteritems()):
+			#loan_id = future_to_loan_id[future]
+			try:
+				avg_repayment_days, loan_obj = future.result()
+				handle_repayment_processed_return(loan_id, avg_repayment_days, loan_obj, using_tqdm=True)
+			except Exception as exc:
+				print('%r generated an exception: %s' % (loan_id, exc))
+			else:
+				print('%r page is %d bytes' % (loan_id, len(data)))
+		
+	else:
+		for loan_id in tqdm(loan_ids):
+			avg_repayment_days, loan_obj = process_repayments(loan_id)
+			handle_repayment_processed_return(loan_id, avg_repayment_days, loan_obj, using_tqdm=True)
 		
 	
 
@@ -140,7 +176,7 @@ def init_cache(cached_loans_filename=None, seen_loans_filename=None):
 #	print(loan_id)
 #	process_repayments(loan_id)
 
-init_cache()
+init_cache(multithread=True)
 pickle.dump(cached_loans, open("cached_loans.pickle", "wb"))
 pickle.dump(seen_loan_ids, open("seen_loan_ids.pickle", "wb"))
 
